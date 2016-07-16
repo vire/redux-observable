@@ -1,22 +1,30 @@
 /* globals describe it */
+import 'babel-polyfill';
 import { expect } from 'chai';
 import sinon from 'sinon';
 import { createStore, applyMiddleware } from 'redux';
 import { createEpicMiddleware } from '../';
-import * as Rx from 'rxjs';
-import Promise from 'promise';
-import 'babel-polyfill';
 import $$observable from 'symbol-observable';
-
-const { Observable } = Rx;
+// We need to import the operators separately and not add them to the Observable
+// prototype, otherwise we might accidentally cover-up that the source we're
+// testing uses an operator that it does not import!
+import { of } from 'rxjs/observable/of';
+import { mergeStatic, merge } from 'rxjs/operator/merge';
+import { mapTo } from 'rxjs/operator/mapTo';
+import { delay } from 'rxjs/operator/delay';
+import { takeUntil } from 'rxjs/operator/takeUntil';
+import { take } from 'rxjs/operator/take';
+import { filter } from 'rxjs/operator/filter';
+import { map } from 'rxjs/operator/map';
+import { startWith } from 'rxjs/operator/startWith';
 
 describe('createEpicMiddleware', () => {
   it('should accept a epic argument that wires up a stream of actions to a stream of actions', () => {
     const reducer = (state = [], action) => state.concat(action);
-    const epic = (actions, store) =>
-      Observable.merge(
-        actions.ofType('FIRE_1').mapTo({ type: 'ACTION_1' }),
-        actions.ofType('FIRE_2').mapTo({ type: 'ACTION_2' })
+    const epic = (action$, store) =>
+      mergeStatic(
+        action$.ofType('FIRE_1')::mapTo({ type: 'ACTION_1' }),
+        action$.ofType('FIRE_2')::mapTo({ type: 'ACTION_2' })
       );
 
     const middleware = createEpicMiddleware(epic);
@@ -35,6 +43,56 @@ describe('createEpicMiddleware', () => {
     ]);
   });
 
+  it('should allow you to replace the root epic with middleware.replaceEpic(epic)', () => {
+    const reducer = (state = [], action) => state.concat(action);
+    const epic1 = action$ =>
+      mergeStatic(
+        of({ type: 'EPIC_1' }),
+        action$.ofType('FIRE_1')::mapTo({ type: 'ACTION_1' }),
+        action$.ofType('FIRE_2')::mapTo({ type: 'ACTION_2' }),
+        action$.ofType('FIRE_GENERIC')::mapTo({ type: 'EPIC_1_GENERIC' })
+      );
+    const epic2 = action$ =>
+      mergeStatic(
+        of({ type: 'EPIC_2' }),
+        action$.ofType('FIRE_3')::mapTo({ type: 'ACTION_3' }),
+        action$.ofType('FIRE_4')::mapTo({ type: 'ACTION_4' }),
+        action$.ofType('FIRE_GENERIC')::mapTo({ type: 'EPIC_2_GENERIC' })
+      );
+
+    const middleware = createEpicMiddleware(epic1);
+
+    const store = createStore(reducer, applyMiddleware(middleware));
+
+    store.dispatch({ type: 'FIRE_1' });
+    store.dispatch({ type: 'FIRE_2' });
+    store.dispatch({ type: 'FIRE_GENERIC' });
+
+    middleware.replaceEpic(epic2);
+
+    store.dispatch({ type: 'FIRE_3' });
+    store.dispatch({ type: 'FIRE_4' });
+    store.dispatch({ type: 'FIRE_GENERIC' });
+
+    expect(store.getState()).to.deep.equal([
+      { type: '@@redux/INIT' },
+      { type: 'EPIC_1' },
+      { type: 'FIRE_1' },
+      { type: 'ACTION_1' },
+      { type: 'FIRE_2' },
+      { type: 'ACTION_2' },
+      { type: 'FIRE_GENERIC' },
+      { type: 'EPIC_1_GENERIC' },
+      { type: 'EPIC_2' },
+      { type: 'FIRE_3' },
+      { type: 'ACTION_3' },
+      { type: 'FIRE_4' },
+      { type: 'ACTION_4' },
+      { type: 'FIRE_GENERIC' },
+      { type: 'EPIC_2_GENERIC' },
+    ]);
+  });
+
   it('emit warning that thunkservable are deprecated', () => {
     sinon.spy(console, 'warn');
 
@@ -42,7 +100,7 @@ describe('createEpicMiddleware', () => {
     const middleware = createEpicMiddleware();
     const store = createStore(reducer, applyMiddleware(middleware));
 
-    store.dispatch(() => Observable.of({ type: 'ASYNC_ACTION_1' }));
+    store.dispatch(() => of({ type: 'ASYNC_ACTION_1' }));
 
     expect(console.warn.calledOnce).to.equal(true);
     expect(
@@ -59,8 +117,8 @@ describe('createEpicMiddleware', () => {
 
     const store = createStore(reducer, applyMiddleware(middleware));
 
-    store.dispatch(() => Observable.of({ type: 'ASYNC_ACTION_1' }).delay(10));
-    store.dispatch(() => Observable.of({ type: 'ASYNC_ACTION_2' }).delay(20));
+    store.dispatch(() => of({ type: 'ASYNC_ACTION_1' })::delay(10));
+    store.dispatch(() => of({ type: 'ASYNC_ACTION_2' })::delay(20));
 
     // HACKY: but should work until we use TestScheduler.
     setTimeout(() => {
@@ -165,15 +223,15 @@ describe('createEpicMiddleware', () => {
     const store = createStore(reducer, applyMiddleware(middleware));
 
     store.dispatch(
-      (actions) => Observable.of({ type: 'ASYNC_ACTION_2' })
-        .delay(10)
-        .takeUntil(actions.filter(action => action.type === 'ASYNC_ACTION_ABORT'))
-        .merge(
-          actions
-            .map(action => ({ type: action.type + '_MERGED' }))
-            .take(1)
+      (action$) => of({ type: 'ASYNC_ACTION_2' })
+        ::delay(10)
+        ::takeUntil(action$::filter(action => action.type === 'ASYNC_ACTION_ABORT'))
+        ::merge(
+          action$
+            ::map(action => ({ type: action.type + '_MERGED' }))
+            ::take(1)
         )
-        .startWith({ type: 'ASYNC_ACTION_1' })
+        ::startWith({ type: 'ASYNC_ACTION_1' })
     );
 
     store.dispatch({ type: 'ASYNC_ACTION_ABORT' });
@@ -197,8 +255,8 @@ describe('createEpicMiddleware', () => {
 
     const store = createStore(reducer, applyMiddleware(middleware));
 
-    const action2 = (actions) => Observable.of({ type: 'ASYNC_ACTION_2' });
-    const action1 = (actions) => Observable.of({ type: 'ASYNC_ACTION_1' }, action2);
+    const action2 = (action$) => of({ type: 'ASYNC_ACTION_2' });
+    const action1 = (action$) => of({ type: 'ASYNC_ACTION_1' }, action2);
 
     store.dispatch(action1);
 
